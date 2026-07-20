@@ -1,0 +1,29 @@
+"""Re-export settings for convenient imports."""
+
+from table_scan.config.settings import (
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_PADDLE_LANG,
+    DEFAULT_TESSERACT_CMD,
+    DEFAULT_TESSERACT_DIR,
+    DEFAULT_VLM_MODEL,
+    OCR_ENGINE_LOCAL,
+    OCR_ENGINE_PADDLE,
+    OCR_ENGINE_URL,
+    OCR_ENGINE_VLM,
+    AppSettings,
+    SUPPORTED_IMAGE_EXTENSIONS,
+)
+
+__all__ = [
+    "AppSettings",
+    "DEFAULT_OLLAMA_URL",
+    "DEFAULT_PADDLE_LANG",
+    "DEFAULT_TESSERACT_CMD",
+    "DEFAULT_TESSERACT_DIR",
+    "DEFAULT_VLM_MODEL",
+    "OCR_ENGINE_LOCAL",
+    "OCR_ENGINE_PADDLE",
+    "OCR_ENGINE_URL",
+    "OCR_ENGINE_VLM",
+    "SUPPORTED_IMAGE_EXTENSIONS",
+]
