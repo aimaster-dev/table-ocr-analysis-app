@@ -36,6 +36,9 @@ from table_scan.config.settings import (
     OCR_ENGINE_PADDLE,
     OCR_ENGINE_URL,
     OCR_ENGINE_VLM,
+    OUTPUT_FORMAT_BOTH,
+    OUTPUT_FORMAT_EXCEL,
+    OUTPUT_FORMAT_HTML,
     AppSettings,
 )
 from table_scan.core.paddle_ocr_engine import PADDLE_LANG_CHOICES
@@ -71,7 +74,7 @@ class MainWindow(QMainWindow):
         self.act_open_dir.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open_dir.triggered.connect(self._browse_input)
 
-        self.act_convert = QAction("Convert to Excel", self)
+        self.act_convert = QAction("Convert", self)
         self.act_convert.setShortcut(QKeySequence("Ctrl+Return"))
         self.act_convert.triggered.connect(self._start_conversion)
 
@@ -125,7 +128,7 @@ class MainWindow(QMainWindow):
         titles = QVBoxLayout()
         title = QLabel(__app_name__)
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Convert photographed paper tables into Excel workbooks")
+        subtitle = QLabel("Convert photographed paper tables into Excel and HTML")
         subtitle.setObjectName("AppSubtitle")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -155,7 +158,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._section("Output folder"))
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Where Excel files will be saved…")
+        self.output_edit.setPlaceholderText("Where converted files will be saved…")
         browse_out = QToolButton()
         browse_out.setText("Browse…")
         browse_out.clicked.connect(self._browse_output)
@@ -163,6 +166,18 @@ class MainWindow(QMainWindow):
         row_out.addWidget(self.output_edit, stretch=1)
         row_out.addWidget(browse_out)
         layout.addLayout(row_out)
+
+        layout.addWidget(self._section("Output format"))
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem("Excel workbook (.xlsx)", OUTPUT_FORMAT_EXCEL)
+        self.output_format_combo.addItem("HTML document (.html)", OUTPUT_FORMAT_HTML)
+        self.output_format_combo.addItem("Excel + HTML", OUTPUT_FORMAT_BOTH)
+        format_index = self.output_format_combo.findData(self.settings.output_format)
+        self.output_format_combo.setCurrentIndex(format_index if format_index >= 0 else 2)
+        self.output_format_combo.currentIndexChanged.connect(
+            self._on_output_format_changed
+        )
+        layout.addWidget(self.output_format_combo)
 
         layout.addWidget(self._section("Options"))
         self.chk_deskew = QCheckBox("Auto-deskew photos")
@@ -237,7 +252,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress)
 
         btn_row = QHBoxLayout()
-        self.btn_convert = QPushButton("Convert to Excel")
+        self.btn_convert = QPushButton("Convert")
         self.btn_convert.setObjectName("PrimaryButton")
         self.btn_convert.clicked.connect(self._start_conversion)
         self.btn_cancel = QPushButton("Cancel")
@@ -249,6 +264,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_cancel)
         btn_row.addWidget(self.btn_open_out)
         layout.addLayout(btn_row)
+        self._on_output_format_changed()
 
         return frame
 
@@ -374,6 +390,18 @@ class MainWindow(QMainWindow):
             self.ocr_location_label.setText("Engine URL")
             self.ocr_location_edit.setPlaceholderText("https://ocr.example.com/v1/recognize")
 
+    def _on_output_format_changed(self) -> None:
+        output_format = self.output_format_combo.currentData()
+        labels = {
+            OUTPUT_FORMAT_EXCEL: "Convert to Excel",
+            OUTPUT_FORMAT_HTML: "Convert to HTML",
+            OUTPUT_FORMAT_BOTH: "Convert to Excel + HTML",
+        }
+        text = labels.get(output_format, "Convert")
+        self.act_convert.setText(text)
+        if hasattr(self, "btn_convert"):
+            self.btn_convert.setText(text)
+
     def _browse_ocr_location(self) -> None:
         start = self.ocr_location_edit.text().strip() or r"C:\Program Files\Tesseract-OCR"
         chosen = QFileDialog.getExistingDirectory(
@@ -392,6 +420,9 @@ class MainWindow(QMainWindow):
         self.settings.deskew = self.chk_deskew.isChecked()
         self.settings.rectify_perspective = self.chk_perspective.isChecked()
         self.settings.enhance_contrast = self.chk_contrast.isChecked()
+        self.settings.output_format = str(
+            self.output_format_combo.currentData() or OUTPUT_FORMAT_BOTH
+        )
         self.settings.ocr_engine = str(self.engine_combo.currentData())
         self.settings.ocr_location = self.ocr_location_edit.text().strip()
         self.settings.vlm_model = self.vlm_model_edit.text().strip() or DEFAULT_VLM_MODEL
@@ -413,7 +444,7 @@ class MainWindow(QMainWindow):
         output = self.output_edit.text().strip()
         if not output:
             # Default beside input.
-            output = str(Path(self.input_edit.text()) / "excel_output")
+            output = str(Path(self.input_edit.text()) / "table_output")
             self.output_edit.setText(output)
 
         self._persist_options()
@@ -450,7 +481,9 @@ class MainWindow(QMainWindow):
         self.progress.setValue(current)
 
         detail = result.message
-        if result.status == JobStatus.SUCCESS and result.output_path:
+        if result.status == JobStatus.SUCCESS and result.output_paths:
+            detail = ", ".join(path.name for path in result.output_paths)
+        elif result.status == JobStatus.SUCCESS and result.output_path:
             detail = result.output_path.name
         self.file_list.update_status(result.image_path, result.status, detail)
 
@@ -482,6 +515,7 @@ class MainWindow(QMainWindow):
         self.chk_deskew.setEnabled(not busy)
         self.chk_perspective.setEnabled(not busy)
         self.chk_contrast.setEnabled(not busy)
+        self.output_format_combo.setEnabled(not busy)
         self.engine_combo.setEnabled(not busy)
         self.ocr_location_edit.setEnabled(not busy)
         self.browse_ocr_btn.setEnabled(not busy)
@@ -505,7 +539,8 @@ class MainWindow(QMainWindow):
             self,
             f"About {__app_name__}",
             f"<b>{__app_name__}</b> v{__version__}<br><br>"
-            "Select a folder of table photos, then convert them into Excel (.xlsx) files.<br><br>"
+            "Select a folder of table photos, then convert them into Excel (.xlsx), "
+            "HTML (.html), or both.<br><br>"
             "OCR: Tesseract, PaddleOCR, or offline VLM · UI: Qt (PySide6)",
         )
 

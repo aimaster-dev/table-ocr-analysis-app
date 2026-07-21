@@ -23,14 +23,23 @@ OCR_ENGINE_PADDLE = "paddle"
 OCR_ENGINE_VLM = "vlm"
 OCR_ENGINE_URL = "url"
 
+OUTPUT_FORMAT_EXCEL = "excel"
+OUTPUT_FORMAT_HTML = "html"
+OUTPUT_FORMAT_BOTH = "both"
+DEFAULT_OUTPUT_FORMAT = OUTPUT_FORMAT_BOTH
+SUPPORTED_OUTPUT_FORMATS = frozenset(
+    {OUTPUT_FORMAT_EXCEL, OUTPUT_FORMAT_HTML, OUTPUT_FORMAT_BOTH}
+)
+
 
 @dataclass
 class AppSettings:
     """Persisted user preferences."""
 
-    settings_version: int = 2
+    settings_version: int = 3
     last_input_dir: str = ""
     last_output_dir: str = ""
+    output_format: str = DEFAULT_OUTPUT_FORMAT
     ocr_languages: list[str] = field(default_factory=lambda: ["eng"])
     # PaddleOCR is the safest first-run choice for the app's primary CJK use
     # case and also recognizes Latin text and numbers in the selected model.
@@ -75,7 +84,13 @@ class AppSettings:
                     and settings.paddle_lang == "ch"
                 ):
                     settings.paddle_lang = DEFAULT_PADDLE_LANG
-                settings.settings_version = 2
+            # Existing installations keep their previous Excel-only behavior;
+            # new installations default to Both so HTML can be reviewed next
+            # to the workbook without running OCR a second time.
+            if stored_version < 3 and "output_format" not in data:
+                settings.output_format = OUTPUT_FORMAT_EXCEL
+            settings.output_format = cls.normalize_output_format(settings.output_format)
+            settings.settings_version = 3
             settings._migrate_location()
             return settings
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -95,7 +110,18 @@ class AppSettings:
             self.ocr_location = str(path.parent if path.suffix.lower() == ".exe" else path)
             self.ocr_engine = OCR_ENGINE_LOCAL
 
+    @staticmethod
+    def normalize_output_format(value: str | None) -> str:
+        normalized = str(value or "").strip().lower()
+        return (
+            normalized
+            if normalized in SUPPORTED_OUTPUT_FORMATS
+            else DEFAULT_OUTPUT_FORMAT
+        )
+
     def save(self) -> None:
+        self.output_format = self.normalize_output_format(self.output_format)
+        self.settings_version = 3
         if self.ocr_engine == OCR_ENGINE_LOCAL:
             from table_scan.core.tesseract_paths import resolve_tesseract_cmd
 

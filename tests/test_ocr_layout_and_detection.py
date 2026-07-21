@@ -11,8 +11,12 @@ import cv2
 import numpy as np
 import pytest
 
-from table_scan.config.settings import AppSettings
-from table_scan.core.layout_mapper import OcrSpan, map_spans_to_grid
+from table_scan.config.settings import (
+    OUTPUT_FORMAT_BOTH,
+    OUTPUT_FORMAT_EXCEL,
+    AppSettings,
+)
+from table_scan.core.layout_mapper import OcrSpan, compose_cell, map_spans_to_grid
 from table_scan.core.ocr_engine import OcrEngine
 from table_scan.core.preprocessor import ImagePreprocessor
 from table_scan.core.paddle_ocr_engine import (
@@ -23,6 +27,7 @@ from table_scan.core.paddle_ocr_engine import (
 from table_scan.core.pipeline import TableExtractionPipeline
 from table_scan.core.table_detector import TableDetector, TableGrid
 from table_scan.models.table_result import JobStatus
+from table_scan.models.table_result import ExtractedTable
 
 
 def _box(x1: int, y1: int, x2: int, y2: int) -> list[list[int]]:
@@ -57,6 +62,25 @@ def test_unicode_cleanup_is_domain_neutral() -> None:
     assert OcrEngine.normalize_cell_value("50,00", col_index=2, col_count=5) == "50,00"
     assert OcrEngine.normalize_cell_value("型号 12-34", col_index=2, col_count=5) == "型号 12-34"
     assert OcrEngine.normalize_cell_value("備考", col_index=4, col_count=5) == "備考"
+    assert OcrEngine.normalize_cell_value(
+        "• First item\n• Second item", col_index=1, col_count=3
+    ) == "• First item\n• Second item"
+    assert OcrEngine.normalize_cell_value(
+        "+ First + Second * Third +Fourth", col_index=1, col_count=3
+    ) == "• First\n• Second\n• Third\n• Fourth"
+
+
+def test_compose_cell_keeps_spaces_between_close_latin_words() -> None:
+    text, _ = compose_cell(
+        [
+            OcrSpan(0, 0, 20, 10, "that", 0.95),
+            OcrSpan(20.5, 0, 28, 10, "is", 0.95),
+            OcrSpan(28.5, 0, 40, 10, "good", 0.95),
+            OcrSpan(40, 0, 42, 10, ".", 0.95),
+        ]
+    )
+
+    assert text == "that is good."
 
 
 def test_paddle_2x_and_3x_results_normalize_without_shape_confusion() -> None:
@@ -191,8 +215,13 @@ def test_old_default_paddle_setting_migrates_to_mixed_handwriting(
 
     settings = AppSettings.load()
 
-    assert settings.settings_version == 2
+    assert settings.settings_version == 3
     assert settings.paddle_lang == MIXED_HANDWRITING_LANG
+    assert settings.output_format == OUTPUT_FORMAT_EXCEL
+
+
+def test_new_settings_default_to_both_output_formats() -> None:
+    assert AppSettings().output_format == OUTPUT_FORMAT_BOTH
 
 
 def test_detector_separates_two_local_tables_from_page_frame() -> None:
@@ -254,6 +283,63 @@ def test_detector_recovers_shaky_hand_drawn_grid() -> None:
 
     assert (grid.rows, grid.cols) == (3, 3)
     assert not grid.is_fallback
+
+
+def test_detector_recovers_edge_clipped_example_without_hough_text_rows() -> None:
+    image_path = Path(__file__).resolve().parents[1] / "example" / "1.webp"
+    image = cv2.imread(str(image_path))
+    assert image is not None
+    processed = ImagePreprocessor().process(image)
+    detector = TableDetector()
+
+    grids = detector.detect(processed)
+
+    assert len(grids) == 1
+    grid = grids[0]
+    assert grid.cols == 3
+    assert grid.cells[0][0][0] > 0  # spreadsheet row-number gutter is excluded
+    assert abs(grid.cells[0][-1][0] + grid.cells[0][-1][2] - (image.shape[1] - 1)) <= 1
+    assert detector._used_hough is False
+
+
+def test_pipeline_trims_empty_grid_bands_and_spreadsheet_column_chrome() -> None:
+    grid = TableGrid(
+        cells=[
+            [(30, 0, 100, 20), (130, 0, 100, 20), (230, 0, 100, 20)],
+            [(30, 20, 100, 30), (130, 20, 100, 30), (230, 20, 100, 30)],
+            [(30, 50, 100, 50), (130, 50, 100, 50), (230, 50, 100, 50)],
+            [(30, 100, 100, 20), (130, 100, 100, 20), (230, 100, 100, 20)],
+        ]
+    )
+    table = ExtractedTable(
+        rows=[
+            ["A", "B", "C"],
+            ["Topic", "Key Points", "Notes"],
+            ["Time", "Use a calendar", "Work in the morning"],
+            ["", "", ""],
+        ],
+        confidences=[[0.99, 0.99, 0.99]] * 4,
+    )
+
+    trimmed = TableExtractionPipeline._trim_table_edges(table, grid=grid)
+
+    assert trimmed.rows == [
+        ["Topic", "Key Points", "Notes"],
+        ["Time", "Use a calendar", "Work in the morning"],
+    ]
+    assert len(trimmed.confidences) == 2
+
+
+def test_focused_retry_keeps_page_detected_wrapping() -> None:
+    current = "Want work thatis\nmeaningful + flexible.\nImpact > income.\nKeep learning always."
+
+    value = TableExtractionPipeline._preserve_line_layout(
+        "Want work that is meaningful + flexible. Impact > income. Keep learning always.",
+        current,
+    )
+
+    assert "that is" in value
+    assert value.count("\n") >= 2
 
 
 def test_perspective_correction_recovers_photographed_grid() -> None:
@@ -326,6 +412,9 @@ def test_pipeline_uses_one_page_pass_when_grid_is_recognized(
     assert fake.page_calls == 1
     assert fake.cell_calls == 0
     assert result.tables[0].rows == [["名称", "Qty"], ["りんご", "12"]]
+    assert {path.suffix for path in result.output_paths} == {".xlsx", ".html"}
+    assert all(path.is_file() for path in result.output_paths)
+    assert "名称" in (tmp_path / "out" / "mixed.html").read_text(encoding="utf-8")
 
 
 def _draw_grid(

@@ -1,4 +1,4 @@
-"""Table Scan — convert photographed paper tables into Excel files."""
+"""Table Scan — convert photographed tables into Excel and HTML files."""
 
-__version__ = "1.2.1"
+__version__ = "1.4.0"
 __app_name__ = "Table Scan"

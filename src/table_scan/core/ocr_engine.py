@@ -159,15 +159,19 @@ class OcrEngine:
 
         self._ensure_ready()
         import pytesseract
+        from pytesseract import Output
 
         gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY) if cell_bgr.ndim == 3 else cell_bgr
         scale = max(3.0, 56.0 / max(h, 1))
         up = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         up = cv2.copyMakeBorder(up, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
 
-        # Narrow cells (serial / price): single word; wide cells: single line.
-        # Prefer PSM 7 for labels (keeps leading capitals better than word mode).
-        if w / max(h, 1) < 1.8:
+        # Tall cells commonly contain wrapped or stacked text even when the
+        # column itself is narrow.  Single-line mode was dropping the first
+        # line of labels such as ``1. Time\nManagement``.
+        if h >= 45:
+            configs = ["--oem 3 --psm 6", "--oem 3 --psm 11", "--oem 3 --psm 7"]
+        elif w / max(h, 1) < 1.8:
             # Never apply a numeric whitelist to an unknown cell: a narrow
             # column can legitimately contain one CJK character or a unit.
             configs = ["--oem 3 --psm 7", "--oem 3 --psm 8", "--oem 3 --psm 10"]
@@ -176,18 +180,49 @@ class OcrEngine:
 
         best_text = ""
         best_conf = 0.0
+        best_score = -1.0
         for config in configs:
-            text = pytesseract.image_to_string(up, lang=self.lang_string, config=config)
+            data = pytesseract.image_to_data(
+                up,
+                lang=self.lang_string,
+                output_type=Output.DICT,
+                config=config,
+            )
+            line_parts: dict[tuple[int, int, int], list[str]] = {}
+            weighted_confidence = 0.0
+            weight = 0
+            for index, raw_text in enumerate(data.get("text", [])):
+                token = self.clean_text(str(raw_text or ""))
+                if not token:
+                    continue
+                try:
+                    confidence = float(data["conf"][index]) / 100.0
+                except (KeyError, TypeError, ValueError):
+                    confidence = 0.0
+                if confidence < 0.0:
+                    continue
+                key = (
+                    int(data.get("block_num", [0])[index]),
+                    int(data.get("par_num", [0])[index]),
+                    int(data.get("line_num", [0])[index]),
+                )
+                line_parts.setdefault(key, []).append(token)
+                token_weight = max(len(token), 1)
+                weighted_confidence += confidence * token_weight
+                weight += token_weight
+            text = "\n".join(" ".join(parts) for parts in line_parts.values())
             text = self.clean_text(text)
             if not text:
                 continue
-            # Prefer longer / cleaner reads.
-            score = len(text) + (0.5 if re.search(r"[A-Za-z]", text) else 0.0)
-            if score > len(best_text):
+            confidence = weighted_confidence / weight if weight else 0.0
+            # Confidence is primary.  Length is only a small tie-breaker so a
+            # long hallucination cannot beat a short, high-confidence label.
+            score = confidence + min(len(text), 40) * 0.001
+            if score > best_score:
                 best_text = text
-                best_conf = 0.75
-                # Good enough for text labels.
-                if re.search(r"[A-Za-z]{3,}", text):
+                best_conf = confidence
+                best_score = score
+                if confidence >= 0.92 and len(text) >= 3:
                     break
 
         if not best_text:
@@ -213,10 +248,27 @@ class OcrEngine:
         output instead of inventing or rewriting values.
         """
         del col_index, col_count
-        text = OcrEngine.clean_text(text)
-        if not text:
-            return ""
-        return text.strip()
+        text = OcrEngine._normalize_bullet_layout(str(text))
+        # Preserve page-level line grouping so bullet lists and wrapped notes
+        # remain readable in Excel.  Clean each line independently because the
+        # general OCR token cleaner intentionally collapses whitespace.
+        lines = [OcrEngine.clean_text(line) for line in str(text).splitlines()]
+        return "\n".join(line for line in lines if line).strip()
+
+    @staticmethod
+    def _normalize_bullet_layout(text: str) -> str:
+        """Restore a list only when OCR found several bullet-like markers."""
+        text = unicodedata.normalize("NFKC", text)
+        marker = re.compile(r"(^|\s)([+*•«·])\s*(?=[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])")
+        matches = list(marker.finditer(text))
+        if len(matches) < 3:
+            return text
+
+        def replace(match: re.Match[str]) -> str:
+            prefix = "" if match.start() == 0 else "\n"
+            return prefix + "• "
+
+        return marker.sub(replace, text)
 
     @staticmethod
     def _upscale(image_bgr: np.ndarray, scale: float) -> np.ndarray:

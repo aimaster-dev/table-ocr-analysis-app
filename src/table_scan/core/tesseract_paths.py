@@ -20,14 +20,15 @@ def resolve_tesseract_cmd(location: str | Path) -> Path:
         raise FileNotFoundError(f"OCR engine path not found:\n{path}")
 
     if path.is_file():
-        if path.name.lower() == "tesseract.exe" or path.suffix.lower() == ".exe":
+        if path.name.lower() in {"tesseract", "tesseract.exe"} or path.suffix.lower() == ".exe":
             return path
         raise FileNotFoundError(f"Not a Tesseract executable:\n{path}")
 
-    # Directory: prefer tesseract.exe inside it.
-    candidate = path / "tesseract.exe"
-    if candidate.is_file():
-        return candidate
+    # Directory: support both the Windows executable and the normal Unix name.
+    for executable_name in ("tesseract.exe", "tesseract"):
+        candidate = path / executable_name
+        if candidate.is_file():
+            return candidate
 
     # tessdata folder selected → parent install dir.
     if path.name.lower() == "tessdata":

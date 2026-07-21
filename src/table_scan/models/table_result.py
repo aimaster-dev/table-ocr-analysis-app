@@ -53,5 +53,6 @@ class ConversionResult:
     status: JobStatus
     tables: list[ExtractedTable] = field(default_factory=list)
     output_path: Path | None = None
+    output_paths: list[Path] = field(default_factory=list)
     message: str = ""
     elapsed_seconds: float = 0.0

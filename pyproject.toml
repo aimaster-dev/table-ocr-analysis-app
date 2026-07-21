@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "table-scan"
-version = "1.2.1"
-description = "Desktop app that converts photographed paper tables into Excel workbooks"
+version = "1.4.0"
+description = "Desktop app that converts photographed paper tables into Excel and HTML"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Table Scan" }]

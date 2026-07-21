@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -54,6 +55,7 @@ class ExcelExporter:
         for index, table in enumerate(tables, start=1):
             title = f"{sheet_prefix}{index}" if len(tables) > 1 else sheet_prefix
             sheet = workbook.create_sheet(title=self._safe_sheet_name(title))
+            sheet.sheet_view.showGridLines = False
             matrix = table.to_rectangular()
 
             for r_idx, row in enumerate(matrix, start=1):
@@ -97,9 +99,25 @@ class ExcelExporter:
         if not matrix:
             return
         col_count = len(matrix[0])
+        widths: list[float] = []
         for col in range(1, col_count + 1):
             max_len = 0
             for row in matrix:
                 text = row[col - 1] if col - 1 < len(row) else ""
-                max_len = max(max_len, len(str(text)))
-            sheet.column_dimensions[get_column_letter(col)].width = min(max(max_len + 2, 10), 48)
+                lines = str(text).splitlines() or [""]
+                max_len = max(max_len, *(len(line) for line in lines))
+            width = min(max(max_len + 2, 10), 48)
+            widths.append(width)
+            sheet.column_dimensions[get_column_letter(col)].width = width
+
+        # Excel does not automatically expand wrapped rows in every viewer.
+        # Estimate the necessary height from explicit newlines and wrapping so
+        # multi-line OCR results are visible when the workbook first opens.
+        for row_index, row in enumerate(matrix, start=1):
+            line_count = 1
+            for col_index, value in enumerate(row):
+                text_lines = str(value or "").splitlines() or [""]
+                usable = max(1, int(widths[col_index] - 1))
+                wrapped = sum(max(1, math.ceil(len(line) / usable)) for line in text_lines)
+                line_count = max(line_count, wrapped)
+            sheet.row_dimensions[row_index].height = min(120, max(18, 15 * line_count + 3))

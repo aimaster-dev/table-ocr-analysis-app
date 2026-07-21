@@ -1,16 +1,23 @@
-"""End-to-end image → table → Excel pipeline."""
+"""End-to-end image → table → Excel/HTML pipeline."""
 
 from __future__ import annotations
 
 import logging
+import textwrap
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from table_scan.config.settings import AppSettings
+from table_scan.config.settings import (
+    OUTPUT_FORMAT_BOTH,
+    OUTPUT_FORMAT_EXCEL,
+    OUTPUT_FORMAT_HTML,
+    AppSettings,
+)
 from table_scan.core.excel_writer import ExcelExporter
+from table_scan.core.html_writer import HtmlExporter
 from table_scan.core.layout_mapper import OcrSpan, map_spans_to_grid, parse_ocr_spans
 from table_scan.core.ocr_engine import OcrEngine
 from table_scan.core.ocr_factory import create_ocr_engine
@@ -22,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class TableExtractionPipeline:
-    """Orchestrates preprocess → detect → OCR → Excel for one or many images."""
+    """Orchestrates preprocess → detect → OCR → selected output formats."""
 
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -34,6 +41,7 @@ class TableExtractionPipeline:
         self.detector = TableDetector()
         self.ocr = create_ocr_engine(settings)
         self.exporter = ExcelExporter()
+        self.html_exporter = HtmlExporter()
 
     def warm_up(self) -> None:
         self.ocr.warm_up()
@@ -52,7 +60,10 @@ class TableExtractionPipeline:
             if image is None:
                 raise ValueError(f"Unable to read image: {image_path}")
 
-            processed = self.preprocessor.process(image) if self.settings.deskew else image
+            # Each preprocessing option is independent.  Previously disabling
+            # deskew accidentally disabled perspective correction and contrast
+            # enhancement as well.
+            processed = self.preprocessor.process(image)
 
             # Offline VLM: ask the model for the whole table (best for handwriting).
             if hasattr(self.ocr, "extract_table"):
@@ -76,22 +87,47 @@ class TableExtractionPipeline:
                         table = self._ocr_grid(
                             processed, grid, image_path, page_spans=page_spans
                         )
+                    table = self._trim_table_edges(table, grid=grid)
                     if self._has_content(table):
                         tables.append(table)
 
             if not tables:
                 raise ValueError("No table content recognized in image")
 
-            output_path = output_dir / f"{image_path.stem}.xlsx"
-            self.exporter.export(tables, output_path)
+            output_format = AppSettings.normalize_output_format(
+                self.settings.output_format
+            )
+            output_paths: list[Path] = []
+            exported_formats: list[str] = []
+            if output_format in {OUTPUT_FORMAT_EXCEL, OUTPUT_FORMAT_BOTH}:
+                excel_path = output_dir / f"{image_path.stem}.xlsx"
+                self.exporter.export(tables, excel_path)
+                output_paths.append(excel_path)
+                exported_formats.append("Excel")
+            if output_format in {OUTPUT_FORMAT_HTML, OUTPUT_FORMAT_BOTH}:
+                html_path = output_dir / f"{image_path.stem}.html"
+                self.html_exporter.export(
+                    tables,
+                    html_path,
+                    title=f"{image_path.stem} — extracted tables",
+                )
+                output_paths.append(html_path)
+                exported_formats.append("HTML")
+
+            if not output_paths:
+                raise ValueError(f"Unsupported output format: {output_format}")
 
             elapsed = time.perf_counter() - started
             return ConversionResult(
                 image_path=image_path,
                 status=JobStatus.SUCCESS,
                 tables=tables,
-                output_path=output_path,
-                message=f"Exported {len(tables)} table(s)",
+                output_path=output_paths[0],
+                output_paths=output_paths,
+                message=(
+                    f"Exported {len(tables)} table(s) to "
+                    + " + ".join(exported_formats)
+                ),
                 elapsed_seconds=elapsed,
             )
         except Exception as exc:  # noqa: BLE001
@@ -135,13 +171,25 @@ class TableExtractionPipeline:
                     rows[row_index][c] = ""
                     confidences[row_index][c] = 0.0
                     continue
-                if current and current_conf >= self.settings.min_cell_confidence:
+                narrow_cell = w / max(h, 1) < 1.8
+                # Tesseract's inexpensive page pass is fast, but wrapped cells
+                # just below 95% often improve with segmentation tailored to a
+                # single crop.  Paddle retries are much costlier and already
+                # have their own handwriting confidence strategy.
+                local_retry = isinstance(self.ocr, OcrEngine) and current_conf < 0.95
+                if (
+                    current
+                    and current_conf >= self.settings.min_cell_confidence
+                    and not narrow_cell
+                    and not local_retry
+                ):
                     continue
 
                 if not has_ink:
                     continue
                 raw, conf = self.ocr.read_cell(crop)
                 value = OcrEngine.normalize_cell_value(raw, col_index=c, col_count=col_count)
+                value = self._preserve_line_layout(value, current)
                 if not value:
                     continue
                 # Use the focused retry when the page pass missed the cell or
@@ -149,7 +197,7 @@ class TableExtractionPipeline:
                 if (
                     not current
                     or conf > current_conf + 0.03
-                    or (conf >= current_conf - 0.05 and len(value) > len(current))
+                    or (conf >= current_conf - 0.06 and len(value) > len(current))
                 ):
                     rows[row_index][c] = value
                     confidences[row_index][c] = conf
@@ -167,6 +215,123 @@ class TableExtractionPipeline:
             source_image=source,
             merged_ranges=list(grid.merged_ranges),
         )
+
+    @staticmethod
+    def _preserve_line_layout(value: str, current: str) -> str:
+        """Keep page-detected wrapping when a focused retry returns one line."""
+        if not value or "\n" in value or "\n" not in current:
+            return value
+        # Allow a small amount of slack because a corrected retry can add a
+        # digit, space, or punctuation that the page pass omitted.
+        target_width = max((len(line) for line in current.splitlines()), default=0) + 2
+        if target_width < 10:
+            return value
+        return "\n".join(
+            textwrap.wrap(
+                value,
+                width=target_width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+
+    @staticmethod
+    def _trim_table_edges(
+        table: ExtractedTable,
+        *,
+        grid: TableGrid | None = None,
+    ) -> ExtractedTable:
+        """Remove empty outer grid bands and recognizable spreadsheet chrome."""
+        width = table.col_count
+        if not table.rows or width == 0:
+            return table
+
+        rows = [list(row) + [""] * (width - len(row)) for row in table.rows]
+        confidences = [
+            list(table.confidences[index]) + [0.0] * (width - len(table.confidences[index]))
+            if index < len(table.confidences)
+            else [0.0] * width
+            for index in range(len(rows))
+        ]
+
+        nonempty = lambda value: bool((value or "").strip())
+        row_start = 0
+        row_end = len(rows)
+        while row_start < row_end and not any(nonempty(value) for value in rows[row_start]):
+            row_start += 1
+        while row_end > row_start and not any(nonempty(value) for value in rows[row_end - 1]):
+            row_end -= 1
+        if row_start == row_end:
+            return ExtractedTable(rows=[], source_image=table.source_image)
+
+        populated_columns = [
+            column
+            for column in range(width)
+            if any(nonempty(rows[row][column]) for row in range(row_start, row_end))
+        ]
+        if not populated_columns:
+            return ExtractedTable(rows=[], source_image=table.source_image)
+        col_start, col_end = populated_columns[0], populated_columns[-1] + 1
+
+        # A screenshot of a spreadsheet contributes a first band containing
+        # the UI column labels A, B, C... .  Remove it only with geometry that
+        # shows the band touching the image top while the table begins after a
+        # left gutter; this avoids treating an ordinary A/B/C header as chrome.
+        if (
+            row_start == 0
+            and grid is not None
+            and grid.cells
+            and grid.cells[0]
+            and grid.cells[0][0][1] <= 2
+            and grid.cells[0][0][0] > 0
+            and TableExtractionPipeline._is_spreadsheet_column_header(
+                rows[0][col_start:col_end],
+                start_column=col_start,
+            )
+        ):
+            row_start += 1
+
+        cropped_rows = [row[col_start:col_end] for row in rows[row_start:row_end]]
+        cropped_confidences = [
+            row[col_start:col_end] for row in confidences[row_start:row_end]
+        ]
+        cropped_merges: list[tuple[int, int, int, int]] = []
+        for r1, c1, r2, c2 in table.merged_ranges:
+            nr1, nr2 = max(r1, row_start), min(r2, row_end - 1)
+            nc1, nc2 = max(c1, col_start), min(c2, col_end - 1)
+            if nr1 <= nr2 and nc1 <= nc2 and (nr2 > nr1 or nc2 > nc1):
+                cropped_merges.append(
+                    (nr1 - row_start, nc1 - col_start, nr2 - row_start, nc2 - col_start)
+                )
+
+        return ExtractedTable(
+            rows=cropped_rows,
+            confidences=cropped_confidences,
+            source_image=table.source_image,
+            merged_ranges=cropped_merges,
+        )
+
+    @staticmethod
+    def _is_spreadsheet_column_header(values: list[str], *, start_column: int) -> bool:
+        if len(values) < 2:
+            return False
+
+        def excel_label(index: int) -> str:
+            label = ""
+            number = index + 1
+            while number:
+                number, remainder = divmod(number - 1, 26)
+                label = chr(ord("A") + remainder) + label
+            return label
+
+        normalized = [str(value or "").strip().upper() for value in values]
+        expected = [excel_label(start_column + index) for index in range(len(values))]
+        plausible = all(
+            not value or (value.isalnum() and len(value) <= 3) for value in normalized
+        )
+        matches = sum(value == target for value, target in zip(normalized, expected))
+        required = max(2, (2 * len(values) + 2) // 3)
+        return plausible and matches >= required
 
     @staticmethod
     def _merged_cell_lookup(
@@ -264,11 +429,33 @@ class TableExtractionPipeline:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
         if gray.size == 0:
             return False
-        _, foreground = cv2.threshold(
-            gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        if min(gray.shape[:2]) > 8:
+            gray = gray[3:-3, 3:-3]
+        median = float(np.median(gray))
+        threshold = min(210.0, median - 25.0)
+        foreground = (gray < threshold).astype(np.uint8)
+        if not np.any(foreground):
+            return False
+
+        component_count, _, stats, _ = cv2.connectedComponentsWithStats(
+            foreground, connectivity=8
         )
-        fraction = float(np.count_nonzero(foreground)) / float(foreground.size)
-        return 0.002 <= fraction <= 0.65
+        meaningful_area = 0
+        height, width = gray.shape[:2]
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            component_w = int(stats[label, cv2.CC_STAT_WIDTH])
+            component_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if area < 3:
+                continue
+            # Residual table rules are long and only a few pixels thick.
+            if component_w >= width * 0.82 and component_h <= 4:
+                continue
+            if component_h >= height * 0.82 and component_w <= 4:
+                continue
+            meaningful_area += area
+        fraction = meaningful_area / float(max(gray.size, 1))
+        return 0.0008 <= fraction <= 0.65
 
     @staticmethod
     def _has_content(table: ExtractedTable) -> bool:

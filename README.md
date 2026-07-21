@@ -1,6 +1,7 @@
 # Table Scan
 
-Desktop app that converts photographed paper tables into Excel (`.xlsx`) files.
+Desktop app that converts photographed paper tables into Excel (`.xlsx`),
+self-contained HTML (`.html`), or both.
 
 ## Features
 
@@ -13,7 +14,8 @@ Desktop app that converts photographed paper tables into Excel (`.xlsx`) files.
 - **PP-OCRv6 mixed handwriting mode** — Korean + Simplified/Traditional Chinese
   + English + numbers in one recognition model, offline after first download
 - **Local VLM (Ollama)** — hard handwriting / messy photos, offline
-- One Excel workbook per image
+- Excel, HTML, or both from one OCR pass
+- One workbook/document per image, including multiple detected tables
 - Native **Qt (PySide6)** UI
 - Windows **`.exe`** packaging via PyInstaller
 
@@ -93,6 +95,31 @@ python -m pip install --upgrade --force-reinstall `
 The `No ccache found` message is harmless for normal inference. It only concerns
 compiling custom Paddle extensions.
 
+## Cropped-grid and spreadsheet screenshot accuracy (1.3)
+
+- Recovers a final row or column whose outer rule is clipped by the image edge.
+- Uses reliable morphological rules before Hough geometry, preventing text
+  baselines from becoming invented rows and from being erased before OCR.
+- Treats missing dividers as merged cells only when neighboring rows confirm
+  the merge; faint photographed rules no longer collapse whole records.
+- Removes recognizable spreadsheet row/column chrome and empty outer grid bands.
+- Preserves OCR line breaks, restores repeated bullet markers, and uses focused
+  Tesseract retries for narrow or uncertain cells.
+- Expands wrapped Excel rows and hides redundant default gridlines so extracted
+  content is visible immediately.
+
+## HTML output (1.4)
+
+- Adds an **Output format** selector: Excel, HTML, or Excel + HTML.
+- Both formats consume the same normalized `ExtractedTable`; selecting Both does
+  not rerun OCR and cannot introduce format-specific recognition differences.
+- HTML preserves Unicode, line breaks, confidence review highlighting, and
+  detected `rowspan` / `colspan` merges.
+- Generated documents are self-contained, responsive, printable, and safe for
+  untrusted OCR text through escaping plus a restrictive Content Security Policy.
+- New installs default to Both. Existing settings migrate to Excel-only so an
+  upgrade does not unexpectedly create additional files.
+
 ## Offline VLM (optional)
 
 ```powershell
@@ -125,7 +152,8 @@ Ship the whole `dist\TableScan` folder. Target PCs need the OCR backend you use 
 1. Browse input folder  
 2. Choose output folder  
 3. Pick OCR engine + language  
-4. Convert to Excel  
+4. Choose Excel, HTML, or Both  
+5. Convert  
 
 ## Notes
 

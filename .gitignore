@@ -15,5 +15,3 @@ build/
 Thumbs.db
 excel_output/
 *.log
-build.spec
-scan_photo.rar

@@ -26,6 +26,7 @@ def _packaging_smoke_test(report_path: str | None) -> int:
         import paddle  # noqa: F401
         import paddlex  # noqa: F401
         from paddleocr import PaddleOCR  # noqa: F401
+        from table_scan.core.html_writer import HtmlExporter  # noqa: F401
 
         for distribution in (
             "table-scan",

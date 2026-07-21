@@ -57,7 +57,12 @@ class TableDetector:
         horizontal = self._extract_lines(binary, horizontal=True)
         vertical = self._extract_lines(binary, horizontal=False)
 
-        grids = self._grids_from_masks(horizontal, vertical, image_bgr.shape[:2])
+        grids = self._grids_from_masks(
+            horizontal,
+            vertical,
+            image_bgr.shape[:2],
+            filter_intersections=False,
+        )
         if not grids:
             # A second, geometry-based pass recovers long but shaky, slanted,
             # or locally broken hand-drawn rules that rectangular morphology
@@ -65,7 +70,12 @@ class TableDetector:
             hough_horizontal, hough_vertical = self._extract_hough_lines(binary)
             horizontal = cv2.bitwise_or(horizontal, hough_horizontal)
             vertical = cv2.bitwise_or(vertical, hough_vertical)
-            grids = self._grids_from_masks(horizontal, vertical, image_bgr.shape[:2])
+            grids = self._grids_from_masks(
+                horizontal,
+                vertical,
+                image_bgr.shape[:2],
+                filter_intersections=True,
+            )
             self._used_hough = bool(grids)
 
         if grids:
@@ -86,6 +96,8 @@ class TableDetector:
         horizontal: np.ndarray,
         vertical: np.ndarray,
         shape: tuple[int, int],
+        *,
+        filter_intersections: bool,
     ) -> list[TableGrid]:
         grids: list[TableGrid] = []
         for x, y, w, h in self._candidate_regions(
@@ -100,8 +112,15 @@ class TableDetector:
             local_x_lines = self._line_positions(
                 v_crop, axis=1, merge_gap=merge_gap
             )
-            local_x_lines, local_y_lines = self._filter_by_intersections(
-                local_x_lines, local_y_lines, h_crop, v_crop
+            if filter_intersections:
+                local_x_lines, local_y_lines = self._filter_by_intersections(
+                    local_x_lines, local_y_lines, h_crop, v_crop
+                )
+            local_x_lines, local_y_lines = self._complete_open_boundaries(
+                local_x_lines,
+                local_y_lines,
+                h_crop,
+                v_crop,
             )
             y_lines = [y + value for value in local_y_lines]
             x_lines = [x + value for value in local_x_lines]
@@ -228,7 +247,12 @@ class TableDetector:
         # Local regions allow partial rules from merged headers and mildly
         # broken photographed grids.  The line mask has already suppressed
         # ordinary text, so a lower span threshold is safe here.
-        threshold = max(ortho * 0.16, float(projection.max()) * 0.32)
+        # Opening has already rejected ordinary glyph strokes.  Requiring a
+        # third of the strongest rule was too aggressive for screenshots and
+        # photographed forms: pale or interrupted internal dividers often have
+        # only 18-25% of the support of the page edge.  A lower dual floor
+        # retains those real rules while still rejecting short text strokes.
+        threshold = max(ortho * 0.10, float(projection.max()) * 0.18)
         mask = projection >= threshold
         if not np.any(mask):
             return []
@@ -248,6 +272,93 @@ class TableDetector:
 
         gap = merge_gap if merge_gap is not None else self.line_merge_gap
         return self._merge_close(positions, min_gap=max(2, gap))
+
+    @classmethod
+    def _complete_open_boundaries(
+        cls,
+        x_lines: list[int],
+        y_lines: list[int],
+        horizontal: np.ndarray,
+        vertical: np.ndarray,
+    ) -> tuple[list[int], list[int]]:
+        """Recover a table boundary clipped exactly by an image edge.
+
+        Phone crops and screenshots commonly omit the final right/bottom rule
+        even though every perpendicular rule continues to the edge.  Treating
+        the open cell as absent drops a whole column or row.  We add an edge
+        only when its gap is comparable to neighboring cells *and* several
+        perpendicular rules visibly span the gap, so ordinary page whitespace
+        is not converted into a synthetic cell.
+        """
+        x_lines = cls._complete_axis_edges(
+            x_lines,
+            extent=horizontal.shape[1],
+            cross_lines=y_lines,
+            cross_mask=horizontal,
+            horizontal_axis=True,
+        )
+        y_lines = cls._complete_axis_edges(
+            y_lines,
+            extent=vertical.shape[0],
+            cross_lines=x_lines,
+            cross_mask=vertical,
+            horizontal_axis=False,
+        )
+        return x_lines, y_lines
+
+    @staticmethod
+    def _complete_axis_edges(
+        lines: list[int],
+        *,
+        extent: int,
+        cross_lines: list[int],
+        cross_mask: np.ndarray,
+        horizontal_axis: bool,
+    ) -> list[int]:
+        if len(lines) < 2 or extent < 2 or len(cross_lines) < 3:
+            return lines
+
+        ordered = sorted(set(lines))
+        gaps = [right - left for left, right in zip(ordered, ordered[1:]) if right > left]
+        if not gaps:
+            return ordered
+        typical = float(np.median(gaps))
+        minimum = max(6.0, typical * 0.45)
+        maximum = max(minimum, typical * 2.5)
+        edge = extent - 1
+
+        def supported(start: int, stop: int) -> bool:
+            if stop - start < minimum:
+                return False
+            hits = 0
+            for position in cross_lines:
+                if horizontal_axis:
+                    sample = cross_mask[
+                        max(0, position - 2) : min(cross_mask.shape[0], position + 3),
+                        max(0, start) : min(cross_mask.shape[1], stop + 1),
+                    ]
+                else:
+                    sample = cross_mask[
+                        max(0, start) : min(cross_mask.shape[0], stop + 1),
+                        max(0, position - 2) : min(cross_mask.shape[1], position + 3),
+                    ]
+                coverage = (
+                    float(np.count_nonzero(sample)) / float(sample.size)
+                    if sample.size
+                    else 0.0
+                )
+                if coverage >= 0.16:
+                    hits += 1
+            return hits >= max(3, int(np.ceil(len(cross_lines) * 0.45)))
+
+        leading = ordered[0]
+        if minimum <= leading <= maximum and supported(0, leading):
+            ordered.insert(0, 0)
+
+        trailing = edge - ordered[-1]
+        if minimum <= trailing <= maximum and supported(ordered[-1], edge):
+            ordered.append(edge)
+        return ordered
 
     @staticmethod
     def _candidate_regions(
@@ -414,23 +525,42 @@ class TableDetector:
         """Infer colspans where an internal divider is absent for one row."""
         merges: list[tuple[int, int, int, int]] = []
         column_count = len(x_lines) - 1
-        for row in range(len(y_lines) - 1):
+        row_count = len(y_lines) - 1
+        supports = np.zeros((row_count, max(0, column_count - 1)), dtype=np.float32)
+        for row in range(row_count):
             y1, y2 = y_lines[row], y_lines[row + 1]
-            if y2 - y1 < 8:
-                continue
-            absent: list[int] = []
             for boundary in range(1, column_count):
                 x = x_lines[boundary]
                 sample = vertical_mask[
                     max(0, y1 + 3) : min(vertical_mask.shape[0], y2 - 2),
                     max(0, x - 2) : min(vertical_mask.shape[1], x + 3),
                 ]
-                support = (
+                supports[row, boundary - 1] = (
                     float(np.count_nonzero(sample)) / float(sample.size)
                     if sample.size
                     else 0.0
                 )
-                if support < 0.12:
+
+        for row in range(len(y_lines) - 1):
+            y1, y2 = y_lines[row], y_lines[row + 1]
+            if y2 - y1 < 8:
+                continue
+            absent: list[int] = []
+            for boundary in range(1, column_count):
+                support = float(supports[row, boundary - 1])
+                neighbors: list[float] = []
+                if row > 0:
+                    neighbors.append(float(supports[row - 1, boundary - 1]))
+                if row + 1 < row_count:
+                    neighbors.append(float(supports[row + 1, boundary - 1]))
+                # A real merged band is normally bounded by rows where the
+                # divider is visible.  Requiring those neighbors prevents a
+                # faint divider missing across several photographed rows from
+                # collapsing whole records into one merged cell.
+                bounded_absence = bool(neighbors) and all(
+                    value >= 0.12 for value in neighbors
+                )
+                if support < 0.12 and bounded_absence:
                     absent.append(boundary)
 
             start: int | None = None

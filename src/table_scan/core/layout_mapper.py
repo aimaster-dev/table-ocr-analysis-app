@@ -146,9 +146,15 @@ def compose_cell(spans: list[OcrSpan]) -> tuple[str, float]:
         pieces = [line[0].text]
         previous = line[0]
         for current in line[1:]:
-            gap = current.x1 - previous.x2
-            close = gap <= max(2.0, min(previous.height, current.height) * 0.12)
-            separator = "" if close or _cjk_boundary(previous.text, current.text) else " "
+            no_space_before = current.text[:1] in ",.;:!?%)]}"
+            no_space_after = previous.text[-1:] in "([{"
+            separator = (
+                ""
+                if _cjk_boundary(previous.text, current.text)
+                or no_space_before
+                or no_space_after
+                else " "
+            )
             pieces.append(separator + current.text)
             previous = current
         text_lines.append("".join(pieces).strip())
