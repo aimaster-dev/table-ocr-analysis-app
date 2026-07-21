@@ -29,7 +29,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "==> Validating the build environment..."
-$Preflight = @'
+$PreflightPath = Join-Path $env:TEMP "tablescan_build_preflight.py"
+@'
 import importlib.metadata as md
 import platform
 import struct
@@ -62,22 +63,28 @@ if errors:
     for error in errors:
         print(f"  - {error}")
     print()
-    print('Repair command:')
-    print('  python -m pip install --upgrade --force-reinstall "paddlepaddle==3.2.2" "paddleocr==3.6.0" "paddlex==3.6.0" "pyinstaller==6.21.0"')
+    print("Repair command:")
+    print(
+        '  python -m pip install --upgrade --force-reinstall '
+        '"paddlepaddle==3.2.2" "paddleocr==3.6.0" "paddlex==3.6.0" "pyinstaller==6.21.0"'
+    )
     raise SystemExit(2)
 
-import paddle
-import paddleocr
-import paddlex
+import paddle  # noqa: F401
+import paddleocr  # noqa: F401
+import paddlex  # noqa: F401
+
 print(f"Python {platform.python_version()} ({platform.architecture()[0]})")
 print(f"paddlepaddle={md.version('paddlepaddle')}")
 print(f"paddleocr={md.version('paddleocr')}")
 print(f"paddlex={md.version('paddlex')}")
 print(f"pyinstaller={md.version('pyinstaller')}")
-'@
+'@ | Set-Content -Path $PreflightPath -Encoding UTF8
 
-& $Python -c $Preflight
-if ($LASTEXITCODE -ne 0) {
+& $Python $PreflightPath
+$PreflightExit = $LASTEXITCODE
+Remove-Item -Force -ErrorAction SilentlyContinue $PreflightPath
+if ($PreflightExit -ne 0) {
     Write-Error "Build environment validation failed"
 }
 

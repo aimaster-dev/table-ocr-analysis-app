@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTextEdit,
@@ -49,6 +51,16 @@ from table_scan.ui.widgets.image_preview import ImagePreview
 from table_scan.ui.workers import ConversionWorker
 
 logger = logging.getLogger(__name__)
+
+
+class _SidebarScrollArea(QScrollArea):
+    """Scroll area that locks content width to the viewport (no horizontal bleed)."""
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        child = self.widget()
+        if child is not None:
+            child.setFixedWidth(self.viewport().width())
 
 
 class MainWindow(QMainWindow):
@@ -115,7 +127,8 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_main_panel())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([340, 820])
+        splitter.setCollapsible(0, False)
+        splitter.setSizes([340, 840])
         root_layout.addWidget(splitter, stretch=1)
 
         status = QStatusBar()
@@ -140,18 +153,51 @@ class MainWindow(QMainWindow):
         frame = QFrame()
         frame.setObjectName("Sidebar")
         frame.setMinimumWidth(300)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        frame.setMaximumWidth(400)
+        frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = _SidebarScrollArea()
+        scroll.setObjectName("SidebarScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+
+        form = QWidget()
+        form.setObjectName("SidebarForm")
+        layout = QVBoxLayout(form)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        def constrain(widget: QWidget) -> QWidget:
+            widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            return widget
+
+        def add_combo(combo: QComboBox) -> None:
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(8)
+            constrain(combo)
+            layout.addWidget(combo)
 
         layout.addWidget(self._section("Input folder"))
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("Select a folder of table photos…")
         self.input_edit.setReadOnly(True)
+        constrain(self.input_edit)
         browse_in = QToolButton()
         browse_in.setText("Browse…")
         browse_in.clicked.connect(self._browse_input)
         row_in = QHBoxLayout()
+        row_in.setSpacing(6)
         row_in.addWidget(self.input_edit, stretch=1)
         row_in.addWidget(browse_in)
         layout.addLayout(row_in)
@@ -159,10 +205,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._section("Output folder"))
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Where converted files will be saved…")
+        constrain(self.output_edit)
         browse_out = QToolButton()
         browse_out.setText("Browse…")
         browse_out.clicked.connect(self._browse_output)
         row_out = QHBoxLayout()
+        row_out.setSpacing(6)
         row_out.addWidget(self.output_edit, stretch=1)
         row_out.addWidget(browse_out)
         layout.addLayout(row_out)
@@ -177,7 +225,7 @@ class MainWindow(QMainWindow):
         self.output_format_combo.currentIndexChanged.connect(
             self._on_output_format_changed
         )
-        layout.addWidget(self.output_format_combo)
+        add_combo(self.output_format_combo)
 
         layout.addWidget(self._section("Options"))
         self.chk_deskew = QCheckBox("Auto-deskew photos")
@@ -193,23 +241,29 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._section("OCR engine"))
         self.engine_combo = QComboBox()
         self.engine_combo.addItem("Local Tesseract (printed)", OCR_ENGINE_LOCAL)
-        self.engine_combo.addItem("Local PaddleOCR (East Asian / handwriting)", OCR_ENGINE_PADDLE)
+        self.engine_combo.addItem(
+            "Local PaddleOCR (East Asian / handwriting)", OCR_ENGINE_PADDLE
+        )
         self.engine_combo.addItem("Local VLM / Ollama (handwriting)", OCR_ENGINE_VLM)
         self.engine_combo.addItem("Remote URL (HTTP API)", OCR_ENGINE_URL)
         engine_index = self.engine_combo.findData(self.settings.ocr_engine)
         self.engine_combo.setCurrentIndex(engine_index if engine_index >= 0 else 0)
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
-        layout.addWidget(self.engine_combo)
+        add_combo(self.engine_combo)
 
         self.ocr_location_label = QLabel("Engine directory / URL")
         self.ocr_location_label.setObjectName("SectionLabel")
         layout.addWidget(self.ocr_location_label)
         self.ocr_location_edit = QLineEdit()
-        self.ocr_location_edit.setText(self.settings.ocr_location or self.settings.tesseract_cmd)
+        self.ocr_location_edit.setText(
+            self.settings.ocr_location or self.settings.tesseract_cmd
+        )
+        constrain(self.ocr_location_edit)
         self.browse_ocr_btn = QToolButton()
         self.browse_ocr_btn.setText("Browse…")
         self.browse_ocr_btn.clicked.connect(self._browse_ocr_location)
         row_ocr = QHBoxLayout()
+        row_ocr.setSpacing(6)
         row_ocr.addWidget(self.ocr_location_edit, stretch=1)
         row_ocr.addWidget(self.browse_ocr_btn)
         layout.addLayout(row_ocr)
@@ -224,10 +278,28 @@ class MainWindow(QMainWindow):
             self.settings.paddle_lang or DEFAULT_PADDLE_LANG
         )
         self.paddle_lang_combo.setCurrentIndex(paddle_idx if paddle_idx >= 0 else 0)
-        layout.addWidget(self.paddle_lang_combo)
+        add_combo(self.paddle_lang_combo)
+
+        self.paddle_model_label = QLabel("Paddle models directory (offline)")
+        self.paddle_model_label.setObjectName("SectionLabel")
+        layout.addWidget(self.paddle_model_label)
+        self.paddle_model_edit = QLineEdit()
+        self.paddle_model_edit.setText(self.settings.paddle_model_dir or "")
+        self.paddle_model_edit.setPlaceholderText(
+            str(Path.home() / ".paddlex" / "official_models")
+        )
+        constrain(self.paddle_model_edit)
+        self.browse_paddle_btn = QToolButton()
+        self.browse_paddle_btn.setText("Browse…")
+        self.browse_paddle_btn.clicked.connect(self._browse_paddle_models)
+        row_paddle = QHBoxLayout()
+        row_paddle.setSpacing(6)
+        row_paddle.addWidget(self.paddle_model_edit, stretch=1)
+        row_paddle.addWidget(self.browse_paddle_btn)
+        layout.addLayout(row_paddle)
+
         self.paddle_lang_hint = QLabel(
-            "For handwritten Korean mixed with Chinese, English, or numbers, "
-            "use the first high-accuracy mode. It downloads PP-OCRv6 once."
+            "Leave empty to auto-download once, or choose extracted model folders."
         )
         self.paddle_lang_hint.setWordWrap(True)
         self.paddle_lang_hint.setObjectName("AppSubtitle")
@@ -239,33 +311,43 @@ class MainWindow(QMainWindow):
         self.vlm_model_edit = QLineEdit()
         self.vlm_model_edit.setText(self.settings.vlm_model or DEFAULT_VLM_MODEL)
         self.vlm_model_edit.setPlaceholderText(DEFAULT_VLM_MODEL)
+        constrain(self.vlm_model_edit)
         layout.addWidget(self.vlm_model_edit)
         self._on_engine_changed()
 
         layout.addWidget(self._section("Images"))
         self.file_list = FileListWidget()
-        layout.addWidget(self.file_list, stretch=1)
+        self.file_list.setMinimumHeight(100)
+        self.file_list.setMaximumHeight(160)
+        layout.addWidget(self.file_list)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        constrain(self.progress)
         layout.addWidget(self.progress)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         self.btn_convert = QPushButton("Convert")
         self.btn_convert.setObjectName("PrimaryButton")
+        self.btn_convert.setToolTip("Start conversion with the selected output format")
         self.btn_convert.clicked.connect(self._start_conversion)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setObjectName("DangerButton")
         self.btn_cancel.clicked.connect(self._cancel_conversion)
-        self.btn_open_out = QPushButton("Open Output")
+        self.btn_open_out = QPushButton("Output")
+        self.btn_open_out.setToolTip("Open the output folder")
         self.btn_open_out.clicked.connect(self._open_output_folder)
-        btn_row.addWidget(self.btn_convert)
-        btn_row.addWidget(self.btn_cancel)
-        btn_row.addWidget(self.btn_open_out)
+        for btn in (self.btn_convert, self.btn_cancel, self.btn_open_out):
+            btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            btn.setMinimumWidth(0)
+            btn_row.addWidget(btn, stretch=1)
         layout.addLayout(btn_row)
-        self._on_output_format_changed()
 
+        scroll.setWidget(form)
+        outer.addWidget(scroll, stretch=1)
+        self._on_output_format_changed()
         return frame
 
     def _build_main_panel(self) -> QWidget:
@@ -370,6 +452,9 @@ class MainWindow(QMainWindow):
         self.browse_ocr_btn.setVisible(is_tesseract)
         self.paddle_lang_label.setVisible(is_paddle)
         self.paddle_lang_combo.setVisible(is_paddle)
+        self.paddle_model_label.setVisible(is_paddle)
+        self.paddle_model_edit.setVisible(is_paddle)
+        self.browse_paddle_btn.setVisible(is_paddle)
         self.paddle_lang_hint.setVisible(is_paddle)
         self.vlm_model_label.setVisible(is_vlm)
         self.vlm_model_edit.setVisible(is_vlm)
@@ -392,15 +477,17 @@ class MainWindow(QMainWindow):
 
     def _on_output_format_changed(self) -> None:
         output_format = self.output_format_combo.currentData()
-        labels = {
-            OUTPUT_FORMAT_EXCEL: "Convert to Excel",
-            OUTPUT_FORMAT_HTML: "Convert to HTML",
+        tips = {
+            OUTPUT_FORMAT_EXCEL: "Convert to Excel workbook (.xlsx)",
+            OUTPUT_FORMAT_HTML: "Convert to HTML document (.html)",
             OUTPUT_FORMAT_BOTH: "Convert to Excel + HTML",
         }
-        text = labels.get(output_format, "Convert")
-        self.act_convert.setText(text)
+        tip = tips.get(output_format, "Convert")
+        self.act_convert.setText("Convert")
+        self.act_convert.setToolTip(tip)
         if hasattr(self, "btn_convert"):
-            self.btn_convert.setText(text)
+            self.btn_convert.setText("Convert")
+            self.btn_convert.setToolTip(tip)
 
     def _browse_ocr_location(self) -> None:
         start = self.ocr_location_edit.text().strip() or r"C:\Program Files\Tesseract-OCR"
@@ -416,6 +503,22 @@ class MainWindow(QMainWindow):
         self.settings.ocr_location = chosen
         self.settings.save()
 
+    def _browse_paddle_models(self) -> None:
+        start = self.paddle_model_edit.text().strip() or str(
+            Path.home() / ".paddlex" / "official_models"
+        )
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Select Paddle models directory",
+            start,
+        )
+        if not chosen:
+            return
+        self.paddle_model_edit.setText(chosen)
+        self.settings.ocr_engine = OCR_ENGINE_PADDLE
+        self.settings.paddle_model_dir = chosen
+        self.settings.save()
+
     def _persist_options(self) -> None:
         self.settings.deskew = self.chk_deskew.isChecked()
         self.settings.rectify_perspective = self.chk_perspective.isChecked()
@@ -429,6 +532,7 @@ class MainWindow(QMainWindow):
         self.settings.paddle_lang = str(
             self.paddle_lang_combo.currentData() or DEFAULT_PADDLE_LANG
         )
+        self.settings.paddle_model_dir = self.paddle_model_edit.text().strip()
         self.settings.last_input_dir = self.input_edit.text().strip()
         self.settings.last_output_dir = self.output_edit.text().strip()
         self.settings.save()
@@ -521,6 +625,8 @@ class MainWindow(QMainWindow):
         self.browse_ocr_btn.setEnabled(not busy)
         self.vlm_model_edit.setEnabled(not busy)
         self.paddle_lang_combo.setEnabled(not busy)
+        self.paddle_model_edit.setEnabled(not busy)
+        self.browse_paddle_btn.setEnabled(not busy)
 
     def _open_output_folder(self) -> None:
         path = self.output_edit.text().strip()

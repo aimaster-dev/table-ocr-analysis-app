@@ -47,8 +47,10 @@ class AppSettings:
     # Local: Tesseract install dir / exe.
     # VLM: Ollama base URL (default localhost).
     # URL: remote OCR HTTP endpoint.
-    # Paddle: unused (models auto-cached); kept for UI consistency.
     ocr_location: str = DEFAULT_TESSERACT_DIR
+    # Optional parent folder of extracted Paddle inference models
+    # (e.g. %USERPROFILE%\.paddlex\official_models). Empty = auto-download.
+    paddle_model_dir: str = ""
     vlm_model: str = DEFAULT_VLM_MODEL
     paddle_lang: str = DEFAULT_PADDLE_LANG
     tesseract_cmd: str = DEFAULT_TESSERACT_CMD

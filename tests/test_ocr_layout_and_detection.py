@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 import json
+import os
+import sys
 
 import cv2
 import numpy as np
@@ -126,6 +127,66 @@ def test_mixed_handwriting_mode_uses_unified_ppocr_v6_model(monkeypatch) -> None
     assert captured["use_doc_unwarping"] is False
     assert captured["use_textline_orientation"] is True
     assert captured["enable_mkldnn"] is False
+
+
+def test_resolve_local_model_dir_finds_extracted_folders(tmp_path: Path) -> None:
+    model = tmp_path / "PP-OCRv6_medium_det"
+    model.mkdir()
+    (model / "inference.yml").write_text("model: det\n", encoding="utf-8")
+
+    found = PaddleOcrEngine.resolve_local_model_dir(tmp_path, "PP-OCRv6_medium_det")
+    nested = tmp_path / "official_models" / "PP-OCRv6_medium_rec"
+    nested.mkdir(parents=True)
+    (nested / "inference.yml").write_text("model: rec\n", encoding="utf-8")
+
+    assert found == model
+    assert (
+        PaddleOcrEngine.resolve_local_model_dir(tmp_path, "PP-OCRv6_medium_rec")
+        == nested
+    )
+
+
+def test_local_model_dir_passes_explicit_paths(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+
+    class FakePipeline:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    for name in (
+        "PP-OCRv6_medium_det",
+        "PP-OCRv6_medium_rec",
+        "PP-LCNet_x1_0_textline_ori",
+    ):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "inference.yml").write_text(f"model: {name}\n", encoding="utf-8")
+
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=FakePipeline))
+    engine = PaddleOcrEngine(
+        paddle_lang=MIXED_HANDWRITING_LANG,
+        model_dir=tmp_path,
+    )
+    engine.warm_up()
+
+    assert captured["text_detection_model_dir"] == str(tmp_path / "PP-OCRv6_medium_det")
+    assert captured["text_recognition_model_dir"] == str(
+        tmp_path / "PP-OCRv6_medium_rec"
+    )
+    assert captured["textline_orientation_model_dir"] == str(
+        tmp_path / "PP-LCNet_x1_0_textline_ori"
+    )
+    assert "lang" not in captured
+    assert os.environ.get("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK") == "True"
+
+
+def test_local_model_dir_missing_models_lists_download_urls(tmp_path: Path) -> None:
+    engine = PaddleOcrEngine(
+        paddle_lang=MIXED_HANDWRITING_LANG,
+        model_dir=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="PP-OCRv6_medium_det_infer.tar"):
+        engine.warm_up()
 
 
 def test_mixed_page_upscale_restores_original_box_coordinates() -> None:

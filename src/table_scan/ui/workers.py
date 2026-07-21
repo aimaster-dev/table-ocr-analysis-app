@@ -44,9 +44,16 @@ class ConversionWorker(QThread):
                     f"Checking local VLM ({self._settings.vlm_model}) via Ollama…"
                 )
             elif engine == "paddle":
-                self.status.emit(
-                    f"Loading PaddleOCR ({self._settings.paddle_lang})… first run downloads models"
-                )
+                if (self._settings.paddle_model_dir or "").strip():
+                    self.status.emit(
+                        f"Loading PaddleOCR ({self._settings.paddle_lang}) "
+                        "from local models…"
+                    )
+                else:
+                    self.status.emit(
+                        f"Loading PaddleOCR ({self._settings.paddle_lang})… "
+                        "first run downloads models"
+                    )
             elif engine == "url":
                 self.status.emit("Checking remote OCR endpoint…")
             else:

@@ -28,6 +28,7 @@ def create_ocr_engine(settings: AppSettings):
             settings.ocr_languages,
             use_gpu=settings.use_gpu,
             paddle_lang=settings.paddle_lang or DEFAULT_PADDLE_LANG,
+            model_dir=settings.paddle_model_dir,
         )
 
     if engine == OCR_ENGINE_VLM:

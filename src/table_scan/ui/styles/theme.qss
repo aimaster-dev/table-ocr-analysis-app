@@ -21,6 +21,36 @@ QFrame#LogCard {
     border-radius: 10px;
 }
 
+QScrollArea#SidebarScroll {
+    background: transparent;
+    border: none;
+}
+
+QWidget#SidebarForm {
+    background: transparent;
+}
+
+QScrollArea#SidebarScroll QScrollBar:vertical {
+    background: #f0f4f8;
+    width: 8px;
+    margin: 2px;
+    border: none;
+}
+
+QScrollArea#SidebarScroll QScrollBar::handle:vertical {
+    background: #9fb3c8;
+    border-radius: 4px;
+    min-height: 24px;
+}
+
+QScrollArea#SidebarScroll QScrollBar::add-line:vertical,
+QScrollArea#SidebarScroll QScrollBar::sub-line:vertical,
+QScrollArea#SidebarScroll QScrollBar::add-page:vertical,
+QScrollArea#SidebarScroll QScrollBar::sub-page:vertical {
+    height: 0;
+    background: transparent;
+}
+
 QLabel#AppTitle {
     font-size: 20px;
     font-weight: 600;
@@ -58,7 +88,7 @@ QPushButton {
     background-color: #ffffff;
     border: 1px solid #bcccdc;
     border-radius: 6px;
-    padding: 8px 14px;
+    padding: 7px 8px;
     color: #102a43;
 }
 

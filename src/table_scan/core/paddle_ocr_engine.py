@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -30,6 +31,10 @@ PADDLE_LANG_CHOICES: list[tuple[str, str]] = [
 ]
 
 DEFAULT_PADDLE_LANG = MIXED_HANDWRITING_LANG
+TEXTLINE_ORIENTATION_MODEL = "PP-LCNet_x1_0_textline_ori"
+_PADDLE_INFER_BASE = (
+    "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"
+)
 
 
 class PaddleOcrEngine:
@@ -37,6 +42,8 @@ class PaddleOcrEngine:
     Local PaddleOCR facade.
 
     Models download once to the user cache, then run fully offline.
+    Optionally point ``model_dir`` at extracted inference folders to skip
+    the first-run download entirely.
     Best default for East Asian handwriting among classic OCR engines.
     """
 
@@ -48,10 +55,13 @@ class PaddleOcrEngine:
         *,
         use_gpu: bool = False,
         paddle_lang: str | None = None,
+        model_dir: str | Path | None = None,
     ) -> None:
         self.paddle_lang = self._resolve_lang(paddle_lang, languages)
         self.mixed_handwriting = self.paddle_lang == MIXED_HANDWRITING_LANG
         self.use_gpu = use_gpu
+        raw_dir = str(model_dir or "").strip()
+        self.model_dir = Path(raw_dir).expanduser() if raw_dir else None
         self._ocr: Any | None = None
 
     @staticmethod
@@ -84,6 +94,111 @@ class PaddleOcrEngine:
         }
         return aliases.get(raw, raw or DEFAULT_PADDLE_LANG)
 
+    @staticmethod
+    def model_bundle_for_lang(paddle_lang: str) -> tuple[str, str, str]:
+        """Return ``(det, rec, textline)`` official model names for a UI lang."""
+        lang = (paddle_lang or DEFAULT_PADDLE_LANG).strip()
+        if lang == "korean":
+            return (
+                "PP-OCRv5_server_det",
+                "korean_PP-OCRv5_mobile_rec",
+                TEXTLINE_ORIENTATION_MODEL,
+            )
+        # mixed handwriting + ch / chinese_cht / japan / en all use PP-OCRv6.
+        return (
+            "PP-OCRv6_medium_det",
+            MIXED_HANDWRITING_MODEL,
+            TEXTLINE_ORIENTATION_MODEL,
+        )
+
+    @staticmethod
+    def model_download_url(model_name: str) -> str:
+        return f"{_PADDLE_INFER_BASE}/{model_name}_infer.tar"
+
+    @staticmethod
+    def looks_like_model_dir(path: Path) -> bool:
+        if not path.is_dir():
+            return False
+        try:
+            entries = list(path.iterdir())
+        except OSError:
+            return False
+        names = {entry.name.lower() for entry in entries}
+        markers = {
+            "inference.yml",
+            "inference.yaml",
+            "inference.json",
+            "model_config.json",
+            "config.json",
+            "inference.pdmodel",
+            "inference.pdiparams",
+        }
+        if names & markers:
+            return True
+        return any(
+            entry.is_file()
+            and entry.suffix.lower() in {".pdmodel", ".pdiparams", ".onnx", ".json", ".yml", ".yaml"}
+            for entry in entries
+        )
+
+    @classmethod
+    def resolve_local_model_dir(cls, root: Path, model_name: str) -> Path | None:
+        """Find an extracted inference folder under ``root`` for ``model_name``."""
+        candidates = [
+            root / model_name,
+            root / f"{model_name}_infer",
+            root / "official_models" / model_name,
+            root / "official_models" / f"{model_name}_infer",
+        ]
+        for candidate in candidates:
+            if cls.looks_like_model_dir(candidate):
+                return candidate
+        return None
+
+    def _local_model_paths(self) -> dict[str, Path] | None:
+        if self.model_dir is None:
+            return None
+        root = self.model_dir
+        if not root.is_dir():
+            raise RuntimeError(
+                "Paddle models directory does not exist:\n"
+                f"  {root}\n\n"
+                "Browse to a folder that contains extracted inference models "
+                "(for example %USERPROFILE%\\.paddlex\\official_models)."
+            )
+        det_name, rec_name, textline_name = self.model_bundle_for_lang(self.paddle_lang)
+        required = {
+            "text_detection_model_dir": det_name,
+            "text_recognition_model_dir": rec_name,
+            "textline_orientation_model_dir": textline_name,
+        }
+        resolved: dict[str, Path] = {}
+        missing: list[str] = []
+        for key, name in required.items():
+            found = self.resolve_local_model_dir(root, name)
+            if found is None:
+                missing.append(name)
+            else:
+                resolved[key] = found
+        if missing:
+            lines = [
+                f"Paddle models directory is missing required model folder(s):\n  {root}",
+                "",
+                "Expected subfolders (extract each .tar into a folder of the same name):",
+            ]
+            for name in missing:
+                lines.append(f"  - {name}")
+                lines.append(f"    {self.model_download_url(name)}")
+            lines.extend(
+                [
+                    "",
+                    "Tip: after one online run, models are usually cached at:",
+                    r"  %USERPROFILE%\.paddlex\official_models",
+                ]
+            )
+            raise RuntimeError("\n".join(lines))
+        return resolved
+
     def warm_up(self) -> None:
         self._ensure_ocr()
 
@@ -102,17 +217,50 @@ class PaddleOcrEngine:
                     "  pip install \"paddlepaddle==3.2.2\" \"paddleocr==3.6.0\"\n"
                 ) from exc
 
-            logger.info("Loading PaddleOCR lang=%s gpu=%s", self.paddle_lang, self.use_gpu)
+            local_paths = self._local_model_paths()
+            if local_paths is not None:
+                # Skip hoster connectivity checks when all models are local.
+                os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+            logger.info(
+                "Loading PaddleOCR lang=%s gpu=%s model_dir=%s",
+                self.paddle_lang,
+                self.use_gpu,
+                self.model_dir or "(auto-download)",
+            )
             cpu_threads = max(1, min(8, os.cpu_count() or 4))
             # PaddlePaddle 3.3.x has a known PIR -> oneDNN attribute conversion
             # failure on CPU.  OCR correctness matters more than this optional
             # acceleration, so keep it disabled on CPU until upstream fixes it.
             enable_mkldnn = False
-            if self.mixed_handwriting:
+            det_name, rec_name, textline_name = self.model_bundle_for_lang(self.paddle_lang)
+            if local_paths is not None:
+                # Explicit local dirs: never hit the network for weights.
+                local_kwargs: dict[str, Any] = {
+                    "text_detection_model_name": det_name,
+                    "text_detection_model_dir": str(local_paths["text_detection_model_dir"]),
+                    "text_recognition_model_name": rec_name,
+                    "text_recognition_model_dir": str(
+                        local_paths["text_recognition_model_dir"]
+                    ),
+                    "textline_orientation_model_name": textline_name,
+                    "textline_orientation_model_dir": str(
+                        local_paths["textline_orientation_model_dir"]
+                    ),
+                    "use_doc_orientation_classify": False,
+                    "use_doc_unwarping": False,
+                    "use_textline_orientation": True,
+                    "text_recognition_batch_size": 6,
+                    "device": "gpu" if self.use_gpu else "cpu",
+                    "enable_mkldnn": enable_mkldnn,
+                    "cpu_threads": cpu_threads,
+                }
+                init_attempts: list[dict[str, Any]] = [local_kwargs]
+            elif self.mixed_handwriting:
                 # PP-OCRv6 uses one shared character vocabulary for Korean,
                 # Chinese, Latin text, and digits.  Separate language models
                 # cannot safely recognize a cell containing multiple scripts.
-                init_attempts: list[dict[str, Any]] = [
+                init_attempts = [
                     {
                         "text_recognition_model_name": MIXED_HANDWRITING_MODEL,
                         "use_doc_orientation_classify": False,
@@ -161,6 +309,12 @@ class PaddleOcrEngine:
                     last_error = exc
                     # Device/gpu kwargs may fail on CPU-only builds; try next.
                     continue
+            if local_paths is not None:
+                raise RuntimeError(
+                    "Failed to initialize PaddleOCR from the local models directory.\n"
+                    f"  {self.model_dir}\n\n"
+                    f"Initialization error: {last_error}"
+                )
             if self.mixed_handwriting:
                 raise RuntimeError(
                     "The mixed Korean/Chinese handwriting mode requires "
