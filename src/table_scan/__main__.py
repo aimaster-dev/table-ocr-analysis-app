@@ -27,6 +27,9 @@ def _packaging_smoke_test(report_path: str | None) -> int:
         import paddlex  # noqa: F401
         from paddleocr import PaddleOCR  # noqa: F401
         from table_scan.core.html_writer import HtmlExporter  # noqa: F401
+        from table_scan.core.paddle_ocr_engine import _patch_frozen_paddlex_deps
+
+        _patch_frozen_paddlex_deps()
 
         for distribution in (
             "table-scan",
@@ -35,6 +38,12 @@ def _packaging_smoke_test(report_path: str | None) -> int:
             "paddlex",
             "PySide6",
             "opencv-python-headless",
+            "opencv-contrib-python",
+            "shapely",
+            "pyclipper",
+            "pypdfium2",
+            "python-bidi",
+            "imagesize",
             "openpyxl",
         ):
             try:
@@ -42,6 +51,16 @@ def _packaging_smoke_test(report_path: str | None) -> int:
             except metadata.PackageNotFoundError:
                 # table-scan's own dist-info is not required in a PyInstaller app.
                 lines.append(f"{distribution}=metadata unavailable")
+
+        # PaddleX OCR requires the ocr-core extra; fail the smoke test if it
+        # would be rejected at pipeline creation time.
+        from paddlex.utils.deps import is_extra_available
+
+        if not (is_extra_available("ocr-core") or is_extra_available("ocr")):
+            raise RuntimeError(
+                "paddlex[ocr-core] dependency check failed inside the frozen app"
+            )
+        lines.append("paddlex_ocr_core=OK")
 
         if getattr(sys, "frozen", False):
             roots = [

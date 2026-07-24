@@ -78,10 +78,28 @@ hiddenimports: list[str] = [
     "paddlex.inference.models.text_recognition",
     "paddlex.inference.models.image_classification",
     "paddlex.inference.models.image_unwarping",
+    # PaddleX OCR-core extras (checked via importlib.metadata at pipeline init)
+    "imagesize",
+    "shapely",
+    "pyclipper",
+    "pypdfium2",
+    "bidi",
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
 ]
+
+# PaddleX OCR pipeline requires paddlex[ocr-core]. Those packages must be
+# present as importable modules *and* as dist-info metadata, because PaddleX
+# uses importlib.metadata (not find_spec) to decide if the extra is installed.
+OCR_CORE_DISTRIBUTIONS = (
+    "imagesize",
+    "opencv-contrib-python",
+    "pyclipper",
+    "pypdfium2",
+    "python-bidi",
+    "shapely",
+)
 
 # Paddle contains native DLLs and several dynamically imported modules. Keep
 # its runtime graph, but do not force PyInstaller to analyze tests/TensorRT.
@@ -110,11 +128,18 @@ for package in ("paddleocr", "paddlex"):
 
 # PaddleX and PaddleOCR query package metadata at runtime for version and
 # optional-dependency checks. Preserve the dist-info records in the bundle.
-for distribution in ("paddlepaddle", "paddleocr", "paddlex"):
+for distribution in ("paddlepaddle", "paddleocr", "paddlex", *OCR_CORE_DISTRIBUTIONS):
     try:
         datas += copy_metadata(distribution, recursive=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[build.spec] copy_metadata({distribution}) failed: {exc}")
+
+# imagesize is a tiny pure-Python package that is easy to miss in the graph.
+for package in ("imagesize", "shapely", "pyclipper", "pypdfium2", "bidi"):
+    try:
+        datas += collect_data_files(package, include_py_files=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[build.spec] collect_data_files({package}) failed: {exc}")
 
 datas = _dedupe(datas)
 binaries = _dedupe(binaries)

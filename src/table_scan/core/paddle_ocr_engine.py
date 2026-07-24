@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from collections.abc import Iterable
 from pathlib import Path
@@ -35,6 +36,60 @@ TEXTLINE_ORIENTATION_MODEL = "PP-LCNet_x1_0_textline_ori"
 _PADDLE_INFER_BASE = (
     "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"
 )
+
+# importlib.metadata name → importable module (for frozen PyInstaller apps)
+_FROZEN_DEP_MODULES = {
+    "opencv-contrib-python": "cv2",
+    "opencv-python": "cv2",
+    "opencv-python-headless": "cv2",
+    "python-bidi": "bidi",
+    "pillow": "PIL",
+    "pyyaml": "yaml",
+}
+
+
+def _patch_frozen_paddlex_deps() -> None:
+    """Make PaddleX OCR-core checks pass when modules exist without dist-info."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        from paddlex.utils import deps
+    except Exception:  # noqa: BLE001
+        return
+    if getattr(deps.is_dep_available, "_table_scan_patched", False):
+        return
+
+    import importlib.util
+
+    original = deps.is_dep_available
+
+    def is_dep_available(dep, /, check_version=False):  # noqa: ANN001
+        if original(dep, check_version=check_version):
+            return True
+        module_name = _FROZEN_DEP_MODULES.get(dep, dep.replace("-", "_"))
+        try:
+            return importlib.util.find_spec(module_name) is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            return False
+
+    is_dep_available._table_scan_patched = True  # type: ignore[attr-defined]
+    deps.is_dep_available = is_dep_available
+    if hasattr(deps.is_extra_available, "cache_clear"):
+        deps.is_extra_available.cache_clear()
+
+
+def _format_init_error(exc: BaseException) -> str:
+    """Unwrap PaddleOCR's generic DependencyError wrapper for a useful message."""
+    parts = [str(exc).strip() or exc.__class__.__name__]
+    cause = exc.__cause__ or exc.__context__
+    depth = 0
+    while cause is not None and depth < 4:
+        text = str(cause).strip()
+        if text and text not in parts:
+            parts.append(text)
+        cause = cause.__cause__ or cause.__context__
+        depth += 1
+    return "\n\n".join(parts)
 
 
 class PaddleOcrEngine:
@@ -221,6 +276,7 @@ class PaddleOcrEngine:
             if local_paths is not None:
                 # Skip hoster connectivity checks when all models are local.
                 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+            _patch_frozen_paddlex_deps()
 
             logger.info(
                 "Loading PaddleOCR lang=%s gpu=%s model_dir=%s",
@@ -310,21 +366,28 @@ class PaddleOcrEngine:
                     # Device/gpu kwargs may fail on CPU-only builds; try next.
                     continue
             if local_paths is not None:
+                detail = _format_init_error(last_error) if last_error else "(unknown)"
                 raise RuntimeError(
                     "Failed to initialize PaddleOCR from the local models directory.\n"
                     f"  {self.model_dir}\n\n"
-                    f"Initialization error: {last_error}"
+                    "On an offline PC this usually means either:\n"
+                    "  1) the models folder is incomplete, or\n"
+                    "  2) this EXE build is missing OCR runtime packages "
+                    "(rebuild with the latest build.spec).\n\n"
+                    f"Initialization error:\n{detail}"
                 )
             if self.mixed_handwriting:
+                detail = _format_init_error(last_error) if last_error else "(unknown)"
                 raise RuntimeError(
                     "The mixed Korean/Chinese handwriting mode requires "
                     "PaddleOCR 3.6 or newer and PaddlePaddle 3.2 or newer.\n\n"
                     "Install the tested versions with:\n"
                     "  pip install --upgrade --force-reinstall "
                     "\"paddlepaddle==3.2.2\" \"paddleocr==3.6.0\"\n\n"
-                    f"Initialization error: {last_error}"
+                    f"Initialization error:\n{detail}"
                 )
-            raise RuntimeError(f"Failed to initialize PaddleOCR: {last_error}")
+            detail = _format_init_error(last_error) if last_error else "(unknown)"
+            raise RuntimeError(f"Failed to initialize PaddleOCR:\n{detail}")
 
     def read_words(self, image_bgr: np.ndarray) -> list[tuple[int, int, int, int, str, float]]:
         lines = self._run_ocr(image_bgr)
